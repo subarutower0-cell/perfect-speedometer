@@ -1025,6 +1025,12 @@ body.flashPulse{animation:flashPulseAnim .7s ease}
       <h3>進む方向</h3>
       <div class="dirbtns" id="dirBtns"></div>
     </div>
+    <div class="grp" id="carsGrp" hidden>
+      <h3>編成（任意）</h3>
+      <div class="opts three" id="carsOpts"></div>
+      <div class="opts three" id="tokuOpts" style="margin-top:7px"></div>
+      <div class="note">選んでおくと「8両編成です。前の2両が特別車です」のように放送します。ミュースカイの車内放送に入っている「1番後ろが8号車です」の部分も、選んだ両数に変わります。分からなければ「指定なし」のままで大丈夫です。</div>
+    </div>
     <div class="grp" id="destGrp" hidden>
       <h3>行き先を選ぶ</h3>
       <div class="stlist" id="destList"></div>
@@ -2711,6 +2717,7 @@ function rtStart(lineKey, type, idx, dir, dest, thru){
   rideEnd();   /* 乗り換えなどで前の路線を追跡していたら、そこで一旦記録を締める */
   RT.lineKey=lineKey; RT.type=type||"local"; RT.idx=idx; RT.dir=dir;
   RT.dest = dest || null;   /* 行き先。未指定なら路線の端が終点になる */
+  RT.cars = PICK_CARS || null; RT.toku = PICK_TOKU || "none";
   RT.through=null; RT.thruKeys=null;
   if(thru && thru.seq && thru.seq.length>1){
     /* 並びは乗車駅が先頭・行き先が末尾なので、前から順に進むだけになる */
@@ -3472,9 +3479,18 @@ function muskyOn(){
 }
 /* 日本語→英語の順に続けて読み上げる。speechSynthesisは「読み上げ待ち行列」を
    持っているので、続けてspeakすれば順番に読まれる。                    */
+/* 実物の台本に書かれている号車の数を、選んだ編成の両数に置き換える。
+   「１番後ろが８号車です」「１番前が８号車です」の部分が対象。
+   編成を選んでいないときは、台本のまま(8号車)にしておく。      */
+function applyCarsToScript(text){
+  const n=Number(RT.cars)||0;
+  if(!n || !text) return text;
+  return String(text).replace(/([１1]番(?:後ろ|前)が)[０-９0-9]+(号車)/g,
+                              (m, head, tail)=>head+n+tail);
+}
 function speakScript(entry){
   if(!entry) return;
-  const seq=[{text:entry.j, lang:"ja-JP"}];
+  const seq=[{text:applyCarsToScript(entry.j), lang:"ja-JP"}];
   if(S.enAnnounceWanted && entry.e) seq.push({text:entry.e, lang:"en-US"});
   speakSeq(seq);
 }
@@ -3527,7 +3543,8 @@ function stationAfterNext(){
 }
 /* 乗車したときのご案内 */
 /* 停車駅のご案内。乗車駅と終点を除いた途中の停車駅を並べる。
-   各駅停車は駅数が多すぎて実際の放送でも言わないので省く。      */
+   実際の放送に合わせて「停車駅は、◯◯、△△の順に停まります」と言う。
+   各駅停車は駅数が多すぎて実物でも言わないので省く。            */
 function lineStopsPhrase(){
   if(lineTypeName()==="普通") return "";
   const st=rtStations(); if(!st || RT.idx==null) return "";
@@ -3536,17 +3553,69 @@ function lineStopsPhrase(){
   for(let i=RT.idx+RT.dir; i!==t; i+=RT.dir){
     if(i<0 || i>=st.length) break;
     mid.push(plainName(st[i].n));
-    if(mid.length>14) return "";        /* 多すぎるときは言わない */
+    if(mid.length>30) return "";        /* 多すぎるときは言わない */
   }
   if(!mid.length) return "";
-  return ""+mid.join("、")+"の順にとまります。";
+  return "停車駅は、"+mid.join("、")+"の順に停まります。";
 }
+
+/* 編成のご案内。選ばれていなければ何も言わない。 */
+function lineCarsPhrase(){
+  const n=RT.cars, tk=RT.toku||"none";
+  if(!n && tk==="none") return "";
+  if(tk==="all"){
+    let t="全車特別車"+(n?"の"+n+"両編成です。":"です。");
+    if(n) t+="前から1号車、2号車の順に連結しております。";
+    return t;
+  }
+  if(tk==="partial"){
+    let t=(n?n+"両編成です。":"");
+    t+="前の2両が特別車";
+    t+=(n && n>2) ? "、後ろの"+(n-2)+"両が一般車です。" : "です。";
+    t+="特別車のご乗車には、ミューチケットが必要です。";
+    return t;
+  }
+  return n ? n+"両編成です。" : "";
+}
+
+/* 終点までのおおよその到着時刻。
+   区間ごとの残り(RT.remain)に、その先の駅間距離を足して全体の残りを出し、
+   種別ごとの平均的な速さ(停車時間込み)で割る。走っていれば実測の平均も混ぜる。 */
+const TYPE_KMH={local:32, semi:38, express:45, rapid_express:50,
+                ltd_express:55, rapid_ltd_express:62, mu_sky:65};
+function remainToTerm(){
+  const st=rtStations(); if(!st || RT.idx==null) return NaN;
+  const t=rtTermIdx(), nx=RT.idx+RT.dir;
+  if(nx<0 || nx>=st.length) return Number.isFinite(RT.remain)?RT.remain:NaN;
+  const beyond=Math.abs(st[t].d - st[nx].d);
+  const near=Number.isFinite(RT.remain) ? RT.remain : Math.abs(st[nx].d - st[RT.idx].d);
+  return near+beyond;
+}
+function termArrivalText(){
+  const st=rtStations(); if(!st) return "";
+  const term=st[rtTermIdx()]; if(!term) return "";
+  const rest=remainToTerm();
+  if(!Number.isFinite(rest) || rest<200) return "";
+  let kmh = TYPE_KMH[RT.lineKey==="meitetsu_musky" ? "mu_sky" : (RT.type||"local")] || 40;
+  if(S.tMove>180 && S.dist>2000){            /* 実測が溜まっていれば混ぜる */
+    const obs=(S.dist/S.tMove)*3.6;
+    if(obs>5 && obs<200) kmh=(kmh+obs)/2;
+  }
+  const sec=rest/(kmh/3.6);
+  if(!(sec>0) || sec>6*3600) return "";
+  const at=new Date(Date.now()+sec*1000);
+  const hh=at.getHours(), mi=at.getMinutes();
+  const jikoku = mi===0 ? (hh+"時ちょうど") : (hh+"時"+mi+"分");
+  return plainName(term.n)+"には、"+jikoku+"頃、到着の予定です。";
+}
+
 function lineStartAnnounce(){
   if(!lineScriptOn()) return;
   const dest=lineDestName(); if(!dest) return;
   let t="ご案内いたします。この列車は、"+lineTypeName()+"、"+dest+"ゆきです。";
-  const sp=lineStopsPhrase();
-  if(sp) t+=sp;
+  const cp=lineCarsPhrase();   if(cp) t+=cp;
+  const sp=lineStopsPhrase();  if(sp) t+=sp;
+  const ap=termArrivalText();  if(ap) t+=ap;
   speak(t);
 }
 /* 駅を発車した後の「次は◯◯です」 */
@@ -3606,6 +3675,7 @@ function speakArrived(name){
 const COMPANIES=[{key:"名古屋鉄道",label:"名鉄"},{key:"名古屋市交通局",label:"地下鉄"},{key:"JR",label:"JR"},
   {key:"名古屋臨海高速鉄道",label:"あおなみ線"},{key:"愛知高速交通",label:"リニモ"}];
 let pickCompany=null, pickLineKey=null, pickType=null;
+let PICK_CARS=null, PICK_TOKU="none";
 
 function buildCompanyOpts(){
   const host=$("companyOpts"); if(!host) return;
@@ -3641,7 +3711,7 @@ function buildLineList(){
       pickLineKey=key; pickType=null;
       for(const ch of host.children) ch.setAttribute("aria-pressed","false");
       b.setAttribute("aria-pressed","true");
-      $("dirGrp").hidden=true; $("destGrp").hidden=true;
+      $("dirGrp").hidden=true; setDestGrp(true);
       buildTypeOpts();
     };
     host.appendChild(b);
@@ -3677,12 +3747,12 @@ function onTypeChosen(){
   const sIn=$("stSearch"); sIn.disabled=false; sIn.value="";
   buildStationList("");
   updateGpsButton();
-  $("dirGrp").hidden=true; $("destGrp").hidden=true;
+  $("dirGrp").hidden=true; setDestGrp(true);
 }
 function clearStationList(msg){
   $("stationList").innerHTML='<p class="hint">'+(msg||"路線を選んでください")+'</p>';
   const sIn=$("stSearch"); sIn.disabled=true; sIn.value="";
-  $("dirGrp").hidden=true; $("destGrp").hidden=true;
+  $("dirGrp").hidden=true; setDestGrp(true);
   updateGpsButton();
 }
 function currentStopList(){
@@ -3719,11 +3789,39 @@ function pickDirection(lineKey, type, idx){
     host.appendChild(b);
   });
   grp.hidden=false;
-  $("destGrp").hidden=true;
+  setDestGrp(true);
   grp.scrollIntoView({behavior:"smooth", block:"nearest"});
 }
 
 /* 行き先を選ぶ。進む向きに残っている停車駅を並べ、終点を先頭に置く。 */
+/* 編成の選択（両数・特別車） */
+const CARS_OPTS=[{v:null,t:"指定なし"},{v:2,t:"2両"},{v:3,t:"3両"},{v:4,t:"4両"},{v:5,t:"5両"},{v:6,t:"6両"},{v:8,t:"8両"}];
+const TOKU_OPTS=[{v:"none",t:"全車一般車"},{v:"partial",t:"一部特別車"},{v:"all",t:"全車特別車"}];
+function buildOptRow(hostId, list, cur, onPick){
+  const host=$(hostId); if(!host) return;
+  host.innerHTML="";
+  list.forEach(o=>{
+    const b=document.createElement("button");
+    b.className="opt"; b.innerHTML="<b>"+o.t+"</b>";
+    b.setAttribute("aria-pressed", o.v===cur ? "true" : "false");
+    b.onclick=()=>{
+      onPick(o.v);
+      for(const ch of host.children) ch.setAttribute("aria-pressed","false");
+      b.setAttribute("aria-pressed","true");
+    };
+    host.appendChild(b);
+  });
+}
+function buildCarsOpts(){
+  buildOptRow("carsOpts", CARS_OPTS, PICK_CARS, v=>{ PICK_CARS=v; });
+  buildOptRow("tokuOpts", TOKU_OPTS, PICK_TOKU, v=>{ PICK_TOKU=v; });
+}
+/* 行き先グループと編成グループはいつも一緒に出し入れする */
+function setDestGrp(hide){
+  const d=$("destGrp"); if(d) d.hidden=hide;
+  const c=$("carsGrp"); if(c){ c.hidden=hide; if(!hide) buildCarsOpts(); }
+}
+
 function pickDest(lineKey, type, idx, dir){
   const L=STATION_LINES[lineKey];
   const st=(type!=="local" && L.types && L.types[type]) ? L.types[type].stations : L.stations;
@@ -3731,7 +3829,7 @@ function pickDest(lineKey, type, idx, dir){
   const ahead=[];
   for(let i=idx+dir; i>=0 && i<st.length; i+=dir) ahead.push(st[i].n);
   if(!ahead.length){   /* 行き先が無い＝もう終点にいる */
-    grp.hidden=true; rtStart(lineKey, type, idx, dir); $("routeSheet").hidden=true; return;
+    setDestGrp(true); rtStart(lineKey, type, idx, dir); $("routeSheet").hidden=true; return;
   }
   host.innerHTML="";
   const add=(name, note, dest)=>{
@@ -3774,8 +3872,8 @@ function pickDest(lineKey, type, idx, dir){
       host.appendChild(bt);
     }
   }
-  grp.hidden=false;
-  grp.scrollIntoView({behavior:"smooth", block:"nearest"});
+  setDestGrp(false);
+  const cg=$("carsGrp"); (cg||grp).scrollIntoView({behavior:"smooth", block:"nearest"});
 }
 
 /* ---- 現在地から自動で駅を選ぶ ----
@@ -4575,7 +4673,7 @@ function save(){
   try{ localStorage.setItem("vd", JSON.stringify(
     {mode:S.mode.key, skin:S.skin, unit:S.unit.key, wake:S.wakeWanted,
      notify:S.notifyWanted, voice:S.voiceWanted, chime:S.chimeWanted, flash:S.flashWanted, vibrate:S.vibrateWanted, airportAnnounce:S.airportAnnounceWanted, enAnnounce:S.enAnnounceWanted, lineAnnounce:S.lineAnnounceWanted, theme:S.theme, full:S.fullMode, chimeVol:S.chimeVol, clipVol:S.clipVol, autoMode:AUTO.mode,
-     rt: (RT.lineKey!=null && RT.idx!=null) ? {line:RT.lineKey, type:RT.type, idx:RT.idx, dir:RT.dir, dest:RT.dest||null, thru:RT.through||null, thruKeys:RT.thruKeys||null} : null
+     rt: (RT.lineKey!=null && RT.idx!=null) ? {line:RT.lineKey, type:RT.type, idx:RT.idx, dir:RT.dir, dest:RT.dest||null, thru:RT.through||null, thruKeys:RT.thruKeys||null, cars:RT.cars||null, toku:RT.toku||"none"} : null
     })); }catch(_){}
 }
 function load(){
@@ -4606,6 +4704,8 @@ function load(){
       if(rtArr && rtArr[o.rt.idx]!=null){
         RT.lineKey=o.rt.line; RT.type=rtType; RT.idx=o.rt.idx; RT.dir=o.rt.dir||1; RT.dest=o.rt.dest||null;
         RT.through=(o.rt.thru&&o.rt.thru.length)?o.rt.thru:null; RT.thruKeys=o.rt.thruKeys||null;
+        RT.cars=o.rt.cars||null; RT.toku=o.rt.toku||"none";
+        PICK_CARS=RT.cars; PICK_TOKU=RT.toku;
         RT.odoBase=S.dist; RT.notified=false; RT.lastAdvance=S.tMove;
         applyLineColor(rtL);
         rideBegin();
@@ -4642,7 +4742,7 @@ load();
    同じ名前のファイルが端末に何個も溜まると、どれを開いているのか
    分からなくなる。版の名前だけでなく、実際の路線データから数えた
    中身も出して、開いているファイルがどれか判別できるようにする。 */
-const BUILD_NAME = "2026-09-06 版 f（停車駅案内・読み方）";
+const BUILD_NAME = "2026-09-06 版 g（編成・到着時刻の放送）";
 function buildSummary(){
   const bits=[];
   try{
